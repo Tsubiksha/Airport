@@ -3,10 +3,45 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { apiFetch } from '../../lib/api';
+import {
+  getAirportTimezone,
+  getAirportNowComponents,
+  resolveLandingDatetime,
+  validateFlightSchedule,
+  validatePickupSchedule,
+  calculateSuggestedPickup,
+  formatLocalDatetime,
+} from '../../lib/dateValidation';
 
 const STEPS = [
-  'Flight', 'Hotel', 'Passengers', 'Price', 'Submitted', 'Offers', 'Confirmed',
+  'Flight', 'Hotel', 'Passengers', 'Pickup', 'Fare & Confirm', 'Submitted', 'Offers', 'Confirmed',
 ];
+
+const STORAGE_KEY = 'rideport_traveler_booking_draft';
+
+function loadDraftFromStorage() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveDraftToStorage(draft) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
+  } catch (e) {}
+}
+
+function clearDraftStorage() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(STORAGE_KEY);
+  } catch (e) {}
+}
 
 function StepsBar({ current }) {
   return (
@@ -37,12 +72,13 @@ function Badge({ status }) {
   return <span className={`badge ${cls}`}>{status}</span>;
 }
 
-// ── Step 1: Flight Selection ──────────────────────────────────────────────────
-function FlightStep({ onSelect }) {
+// ── Step 1: Flight & Flight Travel Date Selection ─────────────────────────────
+function FlightStep({ selectedFlight, selectedDate, onSelect, onDateChange, onNext }) {
   const [flights, setFlights] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [q, setQ] = useState('');
+  const [dateValidation, setDateValidation] = useState({ valid: true, error: '' });
 
   useEffect(() => {
     apiFetch('/api/catalog/flights')
@@ -51,47 +87,139 @@ function FlightStep({ onSelect }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // Validate date whenever flight or date changes
+  useEffect(() => {
+    if (selectedFlight) {
+      const res = validateFlightSchedule(selectedFlight, selectedDate);
+      setDateValidation(res);
+    } else {
+      setDateValidation({ valid: true, error: '' });
+    }
+  }, [selectedFlight, selectedDate]);
+
   const filtered = flights.filter(f =>
     !q || f.flight_id?.toLowerCase().includes(q.toLowerCase()) || f.airline?.toLowerCase().includes(q.toLowerCase())
   );
 
+  const handleFlightCardClick = (f) => {
+    // If selecting a new flight, use its scheduled date if no custom date entered
+    const defaultDate = f.arrival_local?.split('T')[0] || '';
+    const dateToUse = selectedDate || defaultDate;
+    onSelect(f, dateToUse);
+  };
+
+  const handleDateInput = (e) => {
+    const newDate = e.target.value;
+    onDateChange(newDate);
+  };
+
+  const canContinue = selectedFlight && dateValidation.valid;
+
   return (
     <div>
-      <h2 className="section-title" style={{ marginBottom: '1.5rem' }}>Select Your Flight</h2>
-      {error && <div className="alert-error">⚠️ {error}</div>}
-      <div className="search-wrapper">
-        <span className="search-icon">🔍</span>
-        <input className="search-bar" placeholder="Search by flight ID or airline…" value={q} onChange={e => setQ(e.target.value)} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+        <div>
+          <h2 className="section-title" style={{ margin: 0 }}>Select Flight &amp; Travel Date</h2>
+          <p className="text-muted text-sm">Choose an airline service and your travel date.</p>
+        </div>
       </div>
-      {loading ? (
-        <div className="loading-container"><div className="loading-spinner" /><span>Loading flights…</span></div>
-      ) : filtered.length === 0 ? (
-        <div className="empty-state"><div className="empty-state-icon">✈️</div><p>No flights found</p></div>
-      ) : (
-        <div className="grid-2">
-          {filtered.map(f => (
-            <div key={f.flight_id} className="card card-clickable" onClick={() => onSelect(f)}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div>
-                  <div className="card-title">{f.flight_id}</div>
-                  <div className="info-row">
-                    <span>✈️ {f.from} → {f.to}</span>
-                  </div>
-                  {f.airline && <div className="text-sm text-muted mt-1">{f.airline}</div>}
-                  {f.arrival_local && <div className="text-sm text-muted mt-1">🕐 Arrival: {f.arrival_local}</div>}
-                </div>
-                <span style={{ fontSize: '1.5rem', color: '#2563eb' }}>→</span>
+
+      {error && <div className="alert-error">⚠️ {error}</div>}
+
+      {/* Selected Flight & Date Bar if already chosen */}
+      {selectedFlight && (
+        <div className="card" style={{ marginBottom: '1.5rem', background: '#f8fafc', border: '2px solid #2563eb' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span className="badge badge-booked">Selected Flight</span>
+                <strong style={{ fontSize: '1.15rem' }}>{selectedFlight.flight_id} ({selectedFlight.airline})</strong>
+              </div>
+              <div className="text-sm text-muted mt-1">
+                Route: <strong>{selectedFlight.from} → {selectedFlight.to}</strong> · Scheduled Arrival: <strong>{selectedFlight.arrival_local?.split('T')[1]?.substring(0, 5) || '10:30'}</strong> (Airport: {selectedFlight.to})
               </div>
             </div>
-          ))}
+
+            <div style={{ minWidth: '220px' }}>
+              <label className="label" style={{ fontSize: '0.85rem' }}>Travel Date (YYYY-MM-DD) *</label>
+              <input
+                type="date"
+                className="input"
+                value={selectedDate || selectedFlight.arrival_local?.split('T')[0] || ''}
+                onChange={handleDateInput}
+                style={{ fontWeight: 700 }}
+              />
+            </div>
+          </div>
+
+          {!dateValidation.valid && (
+            <div className="alert-error" style={{ marginTop: '1rem', marginBottom: 0 }}>
+              ⚠️ {dateValidation.error}
+            </div>
+          )}
+
+          {dateValidation.valid && (
+            <div style={{ marginTop: '1.25rem', textAlign: 'right' }}>
+              <button className="btn-primary" onClick={onNext}>
+                Continue to Destination Hotel →
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Flight Catalog Search */}
+      <div className="search-wrapper">
+        <span className="search-icon">🔍</span>
+        <input className="search-bar" placeholder="Search by flight ID, airline, or route (e.g. FL-401, Tokyo, AirVeda)…" value={q} onChange={e => setQ(e.target.value)} />
+      </div>
+
+      {loading ? (
+        <div className="loading-container"><div className="loading-spinner" /><span>Loading flights catalog…</span></div>
+      ) : filtered.length === 0 ? (
+        <div className="empty-state"><div className="empty-state-icon">✈️</div><p>No flights found matching your search</p></div>
+      ) : (
+        <div className="grid-2">
+          {filtered.map(f => {
+            const isSelected = selectedFlight?.flight_id === f.flight_id;
+            return (
+              <div
+                key={f.flight_id}
+                className="card card-clickable"
+                onClick={() => handleFlightCardClick(f)}
+                style={{
+                  border: isSelected ? '2px solid #2563eb' : '1px solid #e2e8f0',
+                  background: isSelected ? '#eff6ff' : '#ffffff',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <div>
+                    <div className="card-title" style={{ fontSize: '1.2rem', marginBottom: '0.25rem' }}>{f.flight_id}</div>
+                    <div className="info-row">
+                      <span>✈️ <strong>{f.from}</strong> → <strong>{f.to}</strong></span>
+                    </div>
+                    {f.airline && <div className="text-sm font-semibold mt-1" style={{ color: '#475569' }}>{f.airline} ({f.flight_number})</div>}
+                    {f.arrival_local && (
+                      <div className="text-sm text-muted mt-1">
+                        🕐 Scheduled Arrival: <strong>{f.arrival_local}</strong>
+                      </div>
+                    )}
+                  </div>
+                  <span style={{ fontSize: '1.5rem', color: isSelected ? '#16a34a' : '#2563eb' }}>
+                    {isSelected ? '✓' : '→'}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-// ── Step 2: Hotel Selection ───────────────────────────────────────────────────
-function HotelStep({ flight, onSelect, onBack }) {
+// ── Step 2: Destination Hotel Selection ───────────────────────────────────────
+function HotelStep({ flight, selectedHotel, onSelect, onBack }) {
   const [hotels, setHotels] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -105,73 +233,78 @@ function HotelStep({ flight, onSelect, onBack }) {
   }, []);
 
   const filtered = hotels.filter(h =>
-    !q || h.name?.toLowerCase().includes(q.toLowerCase()) || h.city?.toLowerCase().includes(q.toLowerCase())
+    !q || h.name?.toLowerCase().includes(q.toLowerCase()) || h.city?.toLowerCase().includes(q.toLowerCase()) || h.area?.toLowerCase().includes(q.toLowerCase())
   );
 
   return (
     <div>
       <div className="section-header">
-        <h2 className="section-title">Select Your Destination Hotel</h2>
-        <button className="btn-secondary btn-sm" onClick={onBack}>← Back</button>
+        <div>
+          <h2 className="section-title">Select Destination Hotel</h2>
+          <p className="text-muted text-sm">Where should our partner taxi fleet drop you off?</p>
+        </div>
+        <button className="btn-secondary btn-sm" onClick={onBack}>← Back to Flight</button>
       </div>
+
       <div className="card" style={{ marginBottom: '1rem', background: '#f0f9ff', border: '1px solid #bae6fd' }}>
-        <div className="text-sm text-muted">Arrival Airport: <strong>{flight.to}</strong> (Flight: {flight.flight_id})</div>
+        <div className="text-sm text-muted">
+          Arrival Airport: <strong>{flight.to}</strong> (Flight: <strong>{flight.flight_id}</strong>) · Please select a hotel served by this airport.
+        </div>
       </div>
+
       {error && <div className="alert-error">⚠️ {error}</div>}
+
       <div className="search-wrapper">
         <span className="search-icon">🔍</span>
-        <input className="search-bar" placeholder="Search by hotel name or city…" value={q} onChange={e => setQ(e.target.value)} />
+        <input className="search-bar" placeholder="Search by hotel name, city, or area (e.g. Grand Hyatt, Tokyo, Ueno)…" value={q} onChange={e => setQ(e.target.value)} />
       </div>
+
       {loading ? (
         <div className="loading-container"><div className="loading-spinner" /><span>Loading hotels…</span></div>
       ) : filtered.length === 0 ? (
-        <div className="empty-state"><div className="empty-state-icon">🏨</div><p>No hotels found</p></div>
+        <div className="empty-state"><div className="empty-state-icon">🏨</div><p>No hotels found matching search</p></div>
       ) : (
         <div className="grid-2">
-          {filtered.map(h => (
-            <div key={h.hotel_id || h.name} className="card card-clickable" onClick={() => onSelect(h)}>
-              <div className="card-title">{h.name}</div>
-              <div className="info-row">
-                <span>🏙️ {h.city}</span>
-                {h.area && <span>📍 {h.area}</span>}
+          {filtered.map(h => {
+            const isSelected = selectedHotel?.hotel_id === h.hotel_id;
+            return (
+              <div
+                key={h.hotel_id || h.name}
+                className="card card-clickable"
+                onClick={() => onSelect(h)}
+                style={{
+                  border: isSelected ? '2px solid #2563eb' : '1px solid #e2e8f0',
+                  background: isSelected ? '#eff6ff' : '#ffffff',
+                }}
+              >
+                <div className="card-title" style={{ fontSize: '1.15rem' }}>{h.name}</div>
+                <div className="info-row">
+                  <span>🏙️ <strong>{h.city}</strong></span>
+                  {h.area && <span>📍 Area: <strong>{h.area}</strong></span>}
+                </div>
+                <div className="text-sm text-muted mt-1">Hotel ID: <code>{h.hotel_id}</code></div>
               </div>
-              <div className="text-sm text-muted mt-1">Hotel ID: <code>{h.hotel_id}</code></div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-// ── Step 3: Passenger Details ─────────────────────────────────────────────────
-function PassengerStep({ flight, hotel, onNext, onBack }) {
-  const [adults, setAdults] = useState(1);
-  const [numChildren, setNumChildren] = useState(0);
-  const [childAges, setChildAges] = useState([]);
-  const [largeBags, setLargeBags] = useState(0);
-  const [smallBags, setSmallBags] = useState(0);
-  const [pickup, setPickup] = useState('');
-  const [carType, setCarType] = useState('');
-  const [travelerName, setTravelerName] = useState('');
+// ── Step 3: Passenger & Luggage Details ───────────────────────────────────────
+function PassengerStep({ draft, onChange, onNext, onBack }) {
+  const [adults, setAdults] = useState(draft.adults || 1);
+  const [numChildren, setNumChildren] = useState(draft.numChildren || (draft.childAges?.length || 0));
+  const [childAges, setChildAges] = useState(draft.childAges || []);
+  const [largeBags, setLargeBags] = useState(draft.largeBags || 0);
+  const [smallBags, setSmallBags] = useState(draft.smallBags || 0);
+  const [carType, setCarType] = useState(draft.carType || '');
+  const [travelerName, setTravelerName] = useState(draft.travelerName || '');
   const [error, setError] = useState('');
 
-  // Default pickup 60 min after arrival
-  useEffect(() => {
-    if (flight?.arrival_local) {
-      try {
-        const arr = new Date(flight.arrival_local);
-        const p = new Date(arr.getTime() + 60 * 60 * 1000);
-        // format local YYYY-MM-DDTHH:mm
-        const pad = n => String(n).padStart(2, '0');
-        const formatted = `${p.getFullYear()}-${pad(p.getMonth() + 1)}-${pad(p.getDate())}T${pad(p.getHours())}:${pad(p.getMinutes())}`;
-        setPickup(formatted);
-      } catch {}
-    }
-  }, [flight]);
-
   const handleNumChildrenChange = (e) => {
-    const val = Math.max(0, parseInt(e.target.value) || 0);
+    const val = Math.max(0, parseInt(e.target.value, 10) || 0);
     setNumChildren(val);
     const newAges = [...childAges];
     while (newAges.length < val) newAges.push(5);
@@ -181,7 +314,7 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
 
   const handleChildAgeChange = (index, value) => {
     const updated = [...childAges];
-    updated[index] = Math.max(0, Math.min(17, parseInt(value) || 0));
+    updated[index] = Math.max(0, Math.min(17, parseInt(value, 10) || 0));
     setChildAges(updated);
   };
 
@@ -191,33 +324,37 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
       return;
     }
     if (adults < 1) {
-      setError('At least 1 adult is required');
+      setError('At least 1 adult is required (Rule R2)');
       return;
     }
     for (const age of childAges) {
       if (age < 0 || age > 17) {
-        setError('Child age must be between 0 and 17');
+        setError('Child age must be between 0 and 17 (Rule R1)');
         return;
       }
     }
     setError('');
-    onNext({
+    const update = {
       travelerName: travelerName.trim(),
       adults,
       numChildren,
       childAges,
       largeBags,
       smallBags,
-      pickup: pickup || null,
       carType: carType || null,
-    });
+    };
+    onChange(update);
+    onNext(update);
   };
 
   return (
     <div>
       <div className="section-header">
-        <h2 className="section-title">Passenger &amp; Luggage Details</h2>
-        <button className="btn-secondary btn-sm" onClick={onBack}>← Back</button>
+        <div>
+          <h2 className="section-title">Passenger &amp; Luggage Details</h2>
+          <p className="text-muted text-sm">Tell our fleet suppliers who is traveling and baggage requirements.</p>
+        </div>
+        <button className="btn-secondary btn-sm" onClick={onBack}>← Back to Hotel</button>
       </div>
 
       {error && <div className="alert-error">⚠️ {error}</div>}
@@ -242,7 +379,7 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
               min="1"
               max="20"
               value={adults}
-              onChange={e => setAdults(Math.max(1, parseInt(e.target.value) || 1))}
+              onChange={e => setAdults(Math.max(1, parseInt(e.target.value, 10) || 1))}
             />
           </div>
           <div className="form-group">
@@ -260,7 +397,9 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
 
         {childAges.length > 0 && (
           <div className="form-group" style={{ background: '#f8fafc', padding: '1rem', borderRadius: '8px' }}>
-            <label style={{ marginBottom: '0.5rem', display: 'block' }}>Children's Ages (Rule R1: 0 to 17)</label>
+            <label style={{ marginBottom: '0.5rem', display: 'block', fontWeight: 600 }}>
+              Children's Ages (Rule R1: 0 to 17 years)
+            </label>
             <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
               {childAges.map((age, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -272,7 +411,7 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
                     max="17"
                     value={age}
                     onChange={e => handleChildAgeChange(i, e.target.value)}
-                    style={{ width: '65px' }}
+                    style={{ width: '65px', textAlign: 'center' }}
                   />
                 </div>
               ))}
@@ -288,7 +427,7 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
               type="number"
               min="0"
               value={largeBags}
-              onChange={e => setLargeBags(Math.max(0, parseInt(e.target.value) || 0))}
+              onChange={e => setLargeBags(Math.max(0, parseInt(e.target.value, 10) || 0))}
             />
           </div>
           <div className="form-group">
@@ -298,28 +437,15 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
               type="number"
               min="0"
               value={smallBags}
-              onChange={e => setSmallBags(Math.max(0, parseInt(e.target.value) || 0))}
+              onChange={e => setSmallBags(Math.max(0, parseInt(e.target.value, 10) || 0))}
             />
           </div>
         </div>
 
         <div className="form-group">
-          <label>Pickup Time (Local Airport Time)</label>
-          <input
-            className="input"
-            type="datetime-local"
-            value={pickup}
-            onChange={e => setPickup(e.target.value)}
-          />
-          <span className="text-sm text-muted mt-1" style={{ display: 'block' }}>
-            Rule R2: Must be at least 60 minutes after flight landing ({flight.arrival_local})
-          </span>
-        </div>
-
-        <div className="form-group">
-          <label>Preferred Vehicle Type (Good-to-Have G2)</label>
+          <label>Preferred Vehicle Type (Optional)</label>
           <select className="input" value={carType} onChange={e => setCarType(e.target.value)}>
-            <option value="">Any Vehicle Class (Recommended)</option>
+            <option value="">Any Vehicle Class (Recommended for more quotes)</option>
             <option value="SEDAN">SEDAN</option>
             <option value="SUV">SUV</option>
             <option value="HATCHBACK">HATCHBACK</option>
@@ -328,37 +454,174 @@ function PassengerStep({ flight, hotel, onNext, onBack }) {
         </div>
 
         <button className="btn-primary" onClick={handleNext} style={{ width: '100%', marginTop: '1rem' }}>
-          Continue to Pricing →
+          Continue to Pickup Time →
         </button>
       </div>
     </div>
   );
 }
 
-// ── Step 4: Price Selection ───────────────────────────────────────────────────
-function PriceStep({ flight, hotel, passengers, onSubmit, onBack }) {
+// ── Step 4: Pickup Date & Time Selection ──────────────────────────────────────
+function PickupStep({ flight, flightDate, draftPickup, onNext, onBack }) {
+  const airport = flight?.to;
+  const landingIso = resolveLandingDatetime(flight, flightDate);
+
+  // Suggested pickup calculation: earliest valid = landing + 60 mins if future
+  const suggestedPickup = calculateSuggestedPickup(airport, landingIso);
+
+  // Initialize with draft value, or suggested pickup, never 0000 or invalid
+  const [pickup, setPickup] = useState(draftPickup || suggestedPickup || '');
+  const [validation, setValidation] = useState({ valid: true, error: '' });
+
+  // Revalidate on pickup change
+  useEffect(() => {
+    if (!pickup) {
+      setValidation({ valid: false, error: 'Please enter a pickup date and time' });
+      return;
+    }
+    const res = validatePickupSchedule(airport, landingIso, pickup);
+    setValidation(res);
+  }, [airport, landingIso, pickup]);
+
+  const handleNext = () => {
+    const res = validatePickupSchedule(airport, landingIso, pickup);
+    if (!res.valid) {
+      setValidation(res);
+      return;
+    }
+    onNext(pickup);
+  };
+
+  const airportTz = getAirportTimezone(airport);
+  const airportNow = getAirportNowComponents(airport);
+
+  return (
+    <div>
+      <div className="section-header">
+        <div>
+          <h2 className="section-title">Schedule Pickup Time</h2>
+          <p className="text-muted text-sm">Specify when your driver should meet you at the arrival terminal.</p>
+        </div>
+        <button className="btn-secondary btn-sm" onClick={onBack}>← Back to Passengers</button>
+      </div>
+
+      <div className="card" style={{ maxWidth: '600px', margin: '0 auto' }}>
+        {/* Flight Landing Schedule Banner */}
+        <div style={{ background: '#f8fafc', padding: '1rem 1.25rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1.5rem' }}>
+          <div className="info-row" style={{ margin: 0, paddingBottom: '0.4rem', borderBottom: '1px solid #e2e8f0' }}>
+            <span className="text-muted text-sm">Flight Arrival:</span>
+            <strong>{landingIso ? landingIso.replace('T', ' ') : 'N/A'} ({airport})</strong>
+          </div>
+          <div className="info-row" style={{ margin: 0, paddingTop: '0.4rem' }}>
+            <span className="text-muted text-sm">Airport Timezone:</span>
+            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#2563eb' }}>{airportTz} (Live Time: {airportNow.timeStr})</span>
+          </div>
+        </div>
+
+        {/* Pickup Time Input */}
+        <div className="form-group">
+          <label style={{ fontWeight: 700, fontSize: '0.95rem' }}>Pickup Date &amp; Time (Local Airport Time) *</label>
+          <input
+            className="input"
+            type="datetime-local"
+            value={pickup}
+            onChange={e => setPickup(e.target.value)}
+            style={{ fontSize: '1.15rem', fontWeight: 700 }}
+          />
+          <div className="text-sm text-muted mt-2" style={{ lineHeight: 1.5 }}>
+            🛡️ <strong>Rule R2:</strong> Pickup must be at least 60 minutes after flight landing ({landingIso ? landingIso.replace('T', ' ') : ''}) to allow for disembarkation and baggage collection.
+          </div>
+        </div>
+
+        {/* Suggestion pill */}
+        {suggestedPickup && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => setPickup(suggestedPickup)}
+              style={{ fontSize: '0.8rem' }}
+            >
+              ⚡ Use Earliest Recommended Time ({suggestedPickup.replace('T', ' ')})
+            </button>
+          </div>
+        )}
+
+        {/* Validation Error Banner */}
+        {!validation.valid && (
+          <div className="alert-error" style={{ marginBottom: '1.25rem' }}>
+            ⚠️ {validation.error}
+          </div>
+        )}
+
+        <button
+          className="btn-primary"
+          onClick={handleNext}
+          disabled={!validation.valid || !pickup}
+          style={{ width: '100%', padding: '0.85rem' }}
+        >
+          Continue to Fare &amp; Review →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Step 5: Official Fare Calculation & Confirmation ──────────────────────────
+function PriceStep({ flight, flightDate, hotel, passengers, draftPrice, onSubmit, onBack }) {
   const [route, setRoute] = useState(null);
   const [loadingRoute, setLoadingRoute] = useState(true);
   const [routeError, setRouteError] = useState('');
-  const [priceInr, setPriceInr] = useState('');
+  const [priceInr, setPriceInr] = useState(draftPrice ? String(draftPrice) : '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  const airport = flight?.to;
+  const landingIso = resolveLandingDatetime(flight, flightDate);
+
+  // STRICT VALIDATION: Verify date and pickup validity BEFORE fetching price
+  const flightValidation = validateFlightSchedule(flight, flightDate);
+  const pickupValidation = validatePickupSchedule(airport, landingIso, passengers.pickup);
+  const isScheduleValid = flightValidation.valid && pickupValidation.valid;
+
   useEffect(() => {
-    const params = new URLSearchParams({ airport: flight.to, city: hotel.city, area: hotel.area || '' });
+    if (!isScheduleValid) {
+      setLoadingRoute(false);
+      setRoute(null);
+      setRouteError(flightValidation.error || pickupValidation.error);
+      return;
+    }
+
+    const params = new URLSearchParams({
+      airport: flight.to,
+      city: hotel.city,
+      area: hotel.area || '',
+    });
+
     apiFetch(`/api/routes?${params}`)
       .then(data => {
         setRoute(data);
         const minP = data.price_min_inr || data.min_price_inr;
-        if (minP) setPriceInr(String(minP));
+        // Only set default if traveler hasn't already entered a price
+        if (!priceInr && minP) {
+          setPriceInr(String(minP));
+        }
       })
       .catch(e => setRouteError(e.message))
       .finally(() => setLoadingRoute(false));
-  }, [flight, hotel]);
+  }, [flight, flightDate, hotel, isScheduleValid]);
 
   const handleSubmit = async () => {
+    if (!isScheduleValid) {
+      setError(flightValidation.error || pickupValidation.error);
+      return;
+    }
+
     const price = parseFloat(priceInr);
-    if (isNaN(price)) { setError('Please enter a valid price in INR'); return; }
+    if (isNaN(price)) {
+      setError('Please enter a valid price in INR');
+      return;
+    }
 
     const minPrice = route?.price_min_inr || route?.min_price_inr;
     const maxPrice = route?.price_max_inr || route?.max_price_inr;
@@ -377,20 +640,19 @@ function PriceStep({ flight, hotel, passengers, onSubmit, onBack }) {
     try {
       const payload = {
         flight_id: flight.flight_id,
+        flight_date: flightDate || undefined,
         hotel_id: hotel.hotel_id || hotel.name,
         adults: passengers.adults,
-        child_ages: passengers.childAges.map(a => parseInt(a) || 0),
+        child_ages: passengers.childAges.map(a => parseInt(a, 10) || 0),
         large_bags: passengers.largeBags,
         small_bags: passengers.smallBags,
         car_type: passengers.carType || null,
         traveler_name: passengers.travelerName,
         price_inr: price,
+        pickup: passengers.pickup,
       };
-      if (passengers.pickup) payload.pickup = passengers.pickup;
 
       const result = await apiFetch('/api/requests', { method: 'POST', body: JSON.stringify(payload) });
-
-      // Robust extraction of request ID from top-level or request object
       const reqId = result.request_id || result.request?.request_id;
       if (!reqId) {
         throw new Error('Server did not return a valid Request ID');
@@ -409,56 +671,91 @@ function PriceStep({ flight, hotel, passengers, onSubmit, onBack }) {
   return (
     <div>
       <div className="section-header">
-        <h2 className="section-title">Set Your Budget &amp; Confirm</h2>
-        <button className="btn-secondary btn-sm" onClick={onBack}>← Back</button>
+        <div>
+          <h2 className="section-title">Set Your Budget &amp; Confirm</h2>
+          <p className="text-muted text-sm">Review itinerary details and propose your ride budget within official bounds.</p>
+        </div>
+        <button className="btn-secondary btn-sm" onClick={onBack}>← Back to Pickup</button>
       </div>
 
       {error && <div className="alert-error">⚠️ {error}</div>}
 
-      <div className="card" style={{ maxWidth: '580px', margin: '0 auto' }}>
-        {loadingRoute ? (
-          <div className="loading-container"><div className="loading-spinner" /><span>Calculating route fare bounds…</span></div>
+      <div className="card" style={{ maxWidth: '620px', margin: '0 auto' }}>
+        {/* Booking Summary Card */}
+        <div style={{ background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '1.5rem' }}>
+          <div className="card-title" style={{ fontSize: '1rem', marginBottom: '0.5rem' }}>📋 Itinerary Summary</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', fontSize: '0.9rem' }}>
+            <div><span className="text-muted">Traveler:</span> <strong>{passengers.travelerName}</strong></div>
+            <div><span className="text-muted">Flight:</span> <strong>{flight.flight_id} ({flight.to})</strong></div>
+            <div><span className="text-muted">Hotel:</span> <strong>{hotel.name}</strong></div>
+            <div><span className="text-muted">Pickup:</span> <strong>{passengers.pickup?.replace('T', ' ')}</strong></div>
+            <div><span className="text-muted">Passengers:</span> <strong>{passengers.adults} Adults{passengers.childAges?.length > 0 ? `, ${passengers.childAges.length} Children` : ''}</strong></div>
+            <div><span className="text-muted">Luggage:</span> <strong>{passengers.largeBags}L / {passengers.smallBags}S</strong></div>
+          </div>
+        </div>
+
+        {/* Phase 4: DO NOT DISPLAY PRICE FOR INVALID BOOKINGS */}
+        {!isScheduleValid ? (
+          <div className="alert-error" style={{ marginBottom: '1.5rem' }}>
+            ⛔ <strong>Date Validation Error:</strong> {flightValidation.error || pickupValidation.error}
+            <div className="mt-2 text-sm">
+              Please click Back to select a valid future flight date and pickup time before fare calculation.
+            </div>
+          </div>
+        ) : loadingRoute ? (
+          <div className="loading-container"><div className="loading-spinner" /><span>Calculating official route fare bounds…</span></div>
         ) : routeError ? (
           <div className="alert-error">⚠️ {routeError}</div>
         ) : route ? (
           <div style={{ marginBottom: '1.5rem' }}>
-            <div className="price-range" style={{ padding: '1rem', background: '#ecfdf5', borderRadius: '8px', border: '1px solid #a7f3d0' }}>
-              <div style={{ fontSize: '0.85rem', color: '#047857', fontWeight: 600 }}>OFFICIAL ROUTE FARE BOUNDS (RULE R3)</div>
-              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#065f46', marginTop: '0.25rem' }}>
+            <div className="price-range" style={{ padding: '1.25rem', background: '#ecfdf5', borderRadius: '8px', border: '1px solid #a7f3d0' }}>
+              <div style={{ fontSize: '0.85rem', color: '#047857', fontWeight: 700, letterSpacing: '0.05em' }}>
+                OFFICIAL ROUTE FARE BOUNDS (RULE R3)
+              </div>
+              <div style={{ fontSize: '1.6rem', fontWeight: 800, color: '#065f46', marginTop: '0.35rem' }}>
                 INR {minPrice?.toLocaleString()} – {maxPrice?.toLocaleString()}
               </div>
+              {route.drive_minutes && (
+                <div className="text-sm mt-1" style={{ color: '#047857' }}>
+                  🕐 Estimated drive time: <strong>{route.drive_minutes} minutes</strong> ({route.distance_km} km)
+                </div>
+              )}
             </div>
-            {route.drive_minutes && (
-              <div className="text-sm text-muted mt-2">
-                🕐 Estimated drive time: <strong>{route.drive_minutes} minutes</strong> ({route.distance_km} km)
-              </div>
-            )}
+
+            <div className="form-group" style={{ marginTop: '1.5rem' }}>
+              <label style={{ fontWeight: 700 }}>Your Proposed Price (INR) *</label>
+              <input
+                className="input"
+                type="number"
+                min={minPrice || 0}
+                max={maxPrice}
+                value={priceInr}
+                onChange={e => setPriceInr(e.target.value)}
+                placeholder="Enter price in INR within route bounds"
+                style={{ fontSize: '1.3rem', fontWeight: 800, color: '#1e293b' }}
+              />
+            </div>
+
+            <button
+              className="btn-primary"
+              onClick={handleSubmit}
+              disabled={submitting || !priceInr}
+              style={{ width: '100%', padding: '0.9rem', fontSize: '1.05rem' }}
+            >
+              {submitting ? (
+                <><span className="loading-spinner" style={{ width: '1rem', height: '1rem' }} /> Submitting Request…</>
+              ) : (
+                '🚕 Submit Ride Request to Suppliers'
+              )}
+            </button>
           </div>
         ) : null}
-
-        <div className="form-group">
-          <label>Your Proposed Price (INR) *</label>
-          <input
-            className="input"
-            type="number"
-            min={minPrice || 0}
-            max={maxPrice}
-            value={priceInr}
-            onChange={e => setPriceInr(e.target.value)}
-            placeholder="Enter price in INR within route bounds"
-            style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e293b' }}
-          />
-        </div>
-
-        <button className="btn-primary" onClick={handleSubmit} disabled={submitting} style={{ width: '100%', padding: '0.85rem' }}>
-          {submitting ? <><span className="loading-spinner" style={{ width: '1rem', height: '1rem' }} /> Submitting Request…</> : '🚕 Submit Ride Request'}
-        </button>
       </div>
     </div>
   );
 }
 
-// ── Step 5: Request Submitted ─────────────────────────────────────────────────
+// ── Step 6: Request Submitted Step ───────────────────────────────────────────
 function SubmittedStep({ requestId, onViewOffers }) {
   const [copied, setCopied] = useState(false);
 
@@ -498,14 +795,14 @@ function SubmittedStep({ requestId, onViewOffers }) {
   );
 }
 
-// ── Step 6: Taxi Offers (Real-time 3s auto-sync) ──────────────────────────────
+// ── Step 7: Live Offers Step ──────────────────────────────────────────────────
 export function OffersStep({ requestId, onBooked }) {
   const [offers, setOffers] = useState([]);
   const [requestDetails, setRequestDetails] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filterType, setFilterType] = useState('');
-  const [sortOrder, setSortOrder] = useState('asc'); // 'asc' | 'desc'
+  const [sortOrder, setSortOrder] = useState('asc');
   const [actionError, setActionError] = useState('');
   const [acting, setActing] = useState(null);
   const [lastSync, setLastSync] = useState(null);
@@ -769,7 +1066,7 @@ export function OffersStep({ requestId, onBooked }) {
   );
 }
 
-// ── Step 7: Booking Confirmed ─────────────────────────────────────────────────
+// ── Step 8: Booking Confirmed Step ───────────────────────────────────────────
 function BookingConfirmedStep({ booking }) {
   const [copied, setCopied] = useState(false);
 
@@ -814,84 +1111,228 @@ function BookingConfirmedStep({ booking }) {
           <Link href={`/lookup?number=${booking.booking_number}`} className="btn-primary">
             Track Itinerary →
           </Link>
-          <Link href="/traveler" className="btn-secondary">
+          <button
+            className="btn-secondary"
+            onClick={() => {
+              clearDraftStorage();
+              window.location.href = '/traveler';
+            }}
+          >
             Book Another Ride
-          </Link>
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Main Traveler Page (with URL & LocalStorage persistence) ─────────────────
+// ── Main Traveler Page (with Full Form Persistence & Date Validation) ─────────
 export default function TravelerPage() {
   const [step, setStep] = useState(0);
-  const [flight, setFlight] = useState(null);
-  const [hotel, setHotel] = useState(null);
-  const [passengers, setPassengers] = useState(null);
+
+  // Centralized Draft State with Persistence across all steps
+  const [draft, setDraft] = useState({
+    flight: null,
+    flightDate: '',
+    hotel: null,
+    travelerName: '',
+    adults: 1,
+    numChildren: 0,
+    childAges: [],
+    largeBags: 0,
+    smallBags: 0,
+    carType: '',
+    pickup: '',
+    priceInr: '',
+  });
+
   const [requestId, setRequestId] = useState(null);
   const [booking, setBooking] = useState(null);
 
-  // Read URL query params on initial load
+  // Load draft and URL params on initial mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      const saved = loadDraftFromStorage();
+      if (saved) {
+        setDraft(prev => ({ ...prev, ...saved }));
+      }
+
       const params = new URLSearchParams(window.location.search);
       const urlReq = params.get('request_id');
       const urlStep = params.get('step');
 
       if (urlReq) {
         setRequestId(urlReq);
-        window.localStorage.setItem('rideport_request_id', urlReq);
-        setStep(5); // Directly jump to Offers step
+        setStep(6); // Offers step
       } else if (urlStep === 'offers') {
         const cached = window.localStorage.getItem('rideport_request_id');
         if (cached) {
           setRequestId(cached);
-          setStep(5);
+          setStep(6);
         }
       }
     }
   }, []);
 
+  const updateDraft = (updates) => {
+    setDraft(prev => {
+      const nextDraft = { ...prev, ...updates };
+      saveDraftToStorage(nextDraft);
+      return nextDraft;
+    });
+  };
+
+  const handleFlightSelect = (flightObj, flightDateStr) => {
+    // When flight changes, recalculate suggested pickup if not set
+    const landingIso = resolveLandingDatetime(flightObj, flightDateStr);
+    const suggestedPickup = calculateSuggestedPickup(flightObj.to, landingIso);
+
+    updateDraft({
+      flight: flightObj,
+      flightDate: flightDateStr,
+      // Only recalculate pickup if empty or if flight changed
+      pickup: suggestedPickup || draft.pickup || '',
+    });
+    setStep(1);
+  };
+
+  const handleHotelSelect = (hotelObj) => {
+    updateDraft({ hotel: hotelObj });
+    setStep(2);
+  };
+
+  const handlePassengersNext = (passengerData) => {
+    updateDraft(passengerData);
+    setStep(3);
+  };
+
+  const handlePickupNext = (pickupDatetimeStr) => {
+    updateDraft({ pickup: pickupDatetimeStr });
+    setStep(4);
+  };
+
   const handleRequestSubmitted = (result, reqId) => {
     setRequestId(reqId);
+    clearDraftStorage(); // Clear temporary booking draft on success
     if (typeof window !== 'undefined') {
       window.localStorage.setItem('rideport_request_id', reqId);
       window.history.pushState({}, '', `/traveler?step=submitted&request_id=${reqId}`);
     }
-    setStep(4);
+    setStep(5);
   };
 
   const handleViewOffers = () => {
     if (typeof window !== 'undefined' && requestId) {
       window.history.pushState({}, '', `/traveler?step=offers&request_id=${requestId}`);
     }
-    setStep(5);
+    setStep(6);
+  };
+
+  const handleResetForm = () => {
+    clearDraftStorage();
+    setDraft({
+      flight: null,
+      flightDate: '',
+      hotel: null,
+      travelerName: '',
+      adults: 1,
+      numChildren: 0,
+      childAges: [],
+      largeBags: 0,
+      smallBags: 0,
+      carType: '',
+      pickup: '',
+      priceInr: '',
+    });
+    setStep(0);
   };
 
   return (
     <div className="page-container">
+      {/* Reset button when mid-booking */}
+      {step > 0 && step < 5 && (
+        <div style={{ textAlign: 'right', marginBottom: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn-secondary btn-sm"
+            onClick={handleResetForm}
+            style={{ fontSize: '0.75rem', padding: '0.2rem 0.6rem' }}
+          >
+            ✕ Reset &amp; Start Over
+          </button>
+        </div>
+      )}
+
       <StepsBar current={step} />
 
       {step === 0 && (
-        <FlightStep onSelect={f => { setFlight(f); setStep(1); }} />
+        <FlightStep
+          selectedFlight={draft.flight}
+          selectedDate={draft.flightDate}
+          onSelect={handleFlightSelect}
+          onDateChange={date => updateDraft({ flightDate: date })}
+          onNext={() => setStep(1)}
+        />
       )}
+
       {step === 1 && (
-        <HotelStep flight={flight} onSelect={h => { setHotel(h); setStep(2); }} onBack={() => setStep(0)} />
+        <HotelStep
+          flight={draft.flight}
+          selectedHotel={draft.hotel}
+          onSelect={handleHotelSelect}
+          onBack={() => setStep(0)}
+        />
       )}
+
       {step === 2 && (
-        <PassengerStep flight={flight} hotel={hotel} onNext={p => { setPassengers(p); setStep(3); }} onBack={() => setStep(1)} />
+        <PassengerStep
+          draft={draft}
+          onChange={updateDraft}
+          onNext={handlePassengersNext}
+          onBack={() => setStep(1)}
+        />
       )}
+
       {step === 3 && (
-        <PriceStep flight={flight} hotel={hotel} passengers={passengers} onSubmit={handleRequestSubmitted} onBack={() => setStep(2)} />
+        <PickupStep
+          flight={draft.flight}
+          flightDate={draft.flightDate}
+          draftPickup={draft.pickup}
+          onNext={handlePickupNext}
+          onBack={() => setStep(2)}
+        />
       )}
+
       {step === 4 && (
+        <PriceStep
+          flight={draft.flight}
+          flightDate={draft.flightDate}
+          hotel={draft.hotel}
+          passengers={{
+            travelerName: draft.travelerName,
+            adults: draft.adults,
+            numChildren: draft.numChildren,
+            childAges: draft.childAges,
+            largeBags: draft.largeBags,
+            smallBags: draft.smallBags,
+            carType: draft.carType,
+            pickup: draft.pickup,
+          }}
+          draftPrice={draft.priceInr}
+          onSubmit={handleRequestSubmitted}
+          onBack={() => setStep(3)}
+        />
+      )}
+
+      {step === 5 && (
         <SubmittedStep requestId={requestId} onViewOffers={handleViewOffers} />
       )}
-      {step === 5 && (
-        <OffersStep requestId={requestId} onBooked={b => { setBooking(b); setStep(6); }} />
-      )}
+
       {step === 6 && (
+        <OffersStep requestId={requestId} onBooked={b => { setBooking(b); setStep(7); }} />
+      )}
+
+      {step === 7 && (
         <BookingConfirmedStep booking={booking} />
       )}
     </div>

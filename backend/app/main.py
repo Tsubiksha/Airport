@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from uuid import uuid4
+from pydantic import BaseModel, Field
 
 from app import data_loader
 from app import request_store
@@ -11,6 +12,11 @@ from app import workflow_store
 from app import assignment_service
 from app import booking_service
 from app import change_service
+from app.date_validation import (
+    validate_flight_and_pickup,
+    get_airport_timezone,
+    get_current_time_at_airport,
+)
 from app.database import Base, engine, DB_AVAILABLE
 
 
@@ -239,22 +245,29 @@ def create_ride_request(request: RideRequest):
             detail="The arrival airport does not have a matching route to this hotel area"
         )
 
-    # 6. Read flight landing time
-    arrival_time = datetime.fromisoformat(flight["arrival_local"])
+    # 6. Read flight landing time and apply date override if specified
+    base_arrival = datetime.fromisoformat(flight["arrival_local"])
+    if request.flight_date:
+        try:
+            custom_date = datetime.fromisoformat(request.flight_date).date()
+            arrival_time = datetime.combine(custom_date, base_arrival.time())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid flight date format")
+    else:
+        arrival_time = base_arrival
 
-    # 7. Use provided pickup time or default to landing + 60 minutes
-    pickup_time = request.pickup or (arrival_time + timedelta(minutes=60))
+    # 7. Strict date, landing time, and pickup validation with airport timezone
+    is_valid, err_msg, resolved_pickup = validate_flight_and_pickup(
+        airport_code=arrival_airport,
+        landing_dt=arrival_time,
+        pickup_dt=request.pickup
+    )
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=err_msg)
 
-    # 8. Validate minimum 60-minute gap
-    minimum_pickup = arrival_time + timedelta(minutes=60)
+    pickup_time = resolved_pickup.replace(tzinfo=None)
 
-    if pickup_time < minimum_pickup:
-        raise HTTPException(
-            status_code=400,
-            detail="Pickup must be at least 60 minutes after flight landing"
-        )
-
-    # 9. Validate traveler price against route price range
+    # 8. Validate traveler price against route price range
     minimum_price = route["price_min_inr"]
     maximum_price = route["price_max_inr"]
 
@@ -307,6 +320,51 @@ def get_single_request(request_id: str):
     return request
 
 
+
+
+class ScheduleValidationInput(BaseModel):
+    flight_id: str
+    flight_date: str | None = None
+    pickup: datetime | None = None
+
+
+@app.post("/api/requests/validate-schedule")
+def validate_schedule_endpoint(payload: ScheduleValidationInput):
+    flights = data_loader.get_flights()
+    flight = next((f for f in flights if f["flight_id"] == payload.flight_id), None)
+    if flight is None:
+        raise HTTPException(status_code=404, detail="Flight not found")
+
+    arrival_airport = flight["to"]
+    base_arrival = datetime.fromisoformat(flight["arrival_local"])
+    if payload.flight_date:
+        try:
+            custom_date = datetime.fromisoformat(payload.flight_date).date()
+            arrival_time = datetime.combine(custom_date, base_arrival.time())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid flight date format")
+    else:
+        arrival_time = base_arrival
+
+    is_valid, err_msg, resolved_pickup = validate_flight_and_pickup(
+        airport_code=arrival_airport,
+        landing_dt=arrival_time,
+        pickup_dt=payload.pickup,
+    )
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=err_msg)
+
+    tz = get_airport_timezone(arrival_airport)
+    earliest_valid = arrival_time + timedelta(minutes=60)
+
+    return {
+        "valid": True,
+        "airport": arrival_airport,
+        "airport_timezone": str(tz),
+        "landing_datetime": arrival_time.isoformat(),
+        "earliest_pickup": earliest_valid.isoformat(),
+        "resolved_pickup": resolved_pickup.replace(tzinfo=None).isoformat()
+    }
 
 
 # -----------------------------------------

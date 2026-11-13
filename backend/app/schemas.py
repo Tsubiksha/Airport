@@ -7,6 +7,7 @@ class RideRequest(BaseModel):
 
     flight_id: str
     hotel_id: str
+    flight_date: str | None = None
 
     adults: int = Field(ge=1)
     child_ages: list[int] = []
