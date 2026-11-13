@@ -37,6 +37,7 @@ export default function SupplierPortalPage() {
   const [changes, setChanges] = useState([]);
   const [loadingChanges, setLoadingChanges] = useState(false);
   const [decisionStatus, setDecisionStatus] = useState({}); // { [chg_id]: { loading, error, success } }
+  const [remarksState, setRemarksState] = useState({}); // { [chg_id]: string }
   const [lastSync, setLastSync] = useState(null);
 
   // Load suppliers
@@ -130,6 +131,9 @@ export default function SupplierPortalPage() {
       [requestId]: { loading: true, error: null, success: null },
     }));
 
+    const expiryVal = form.expires_in_minutes !== undefined ? form.expires_in_minutes : '30';
+    const expiresInMin = (expiryVal === '0' || expiryVal === '' || expiryVal === null) ? null : Number(expiryVal);
+
     try {
       const res = await apiFetch(
         `/api/suppliers/${selectedSupplier.company_id}/requests/${requestId}/offers`,
@@ -138,6 +142,7 @@ export default function SupplierPortalPage() {
           body: JSON.stringify({
             vehicle_id: form.vehicle_id,
             price_inr: Number(form.price_inr),
+            expires_in_minutes: expiresInMin,
           }),
         }
       );
@@ -153,7 +158,7 @@ export default function SupplierPortalPage() {
       // Clear input fields for this request
       setAssignForm((prev) => ({
         ...prev,
-        [requestId]: { vehicle_id: '', price_inr: '' },
+        [requestId]: { vehicle_id: '', price_inr: '', expires_in_minutes: '30' },
       }));
 
       // Refresh offers and requests
@@ -177,19 +182,21 @@ export default function SupplierPortalPage() {
       [changeId]: { loading: true, error: null },
     }));
 
+    const remarks = remarksState[changeId] || (decision === 'ACCEPTED' ? 'Change accepted by supplier' : 'Vehicle not available at the requested time');
+
     try {
       await apiFetch(`/api/change-requests/${changeId}/decision`, {
         method: 'POST',
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({ decision, remarks }),
       });
 
       setDecisionStatus((prev) => ({
         ...prev,
-        [changeId]: { loading: false, success: `Change ${decision.toLowerCase()}` },
+        [changeId]: { loading: false, success: `Change ${decision.toLowerCase()} successfully` },
       }));
 
       // Refresh changes
-      fetchChanges(selectedSupplier.company_id);
+      fetchChanges(selectedSupplier.company_id, true);
     } catch (err) {
       setDecisionStatus((prev) => ({
         ...prev,
@@ -466,7 +473,7 @@ export default function SupplierPortalPage() {
                     {/* Vehicle Assignment Form */}
                     <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1rem' }}>
                       <h4 style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.75rem', color: '#1e293b' }}>
-                        🚗 Assign Vehicle &amp; Submit Offer (Rule R7)
+                        🚗 Assign Vehicle &amp; Submit Offer (Rules R7, G1, G4)
                       </h4>
 
                       <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
@@ -491,7 +498,7 @@ export default function SupplierPortalPage() {
                           </select>
                         </div>
 
-                        <div style={{ flex: '1 1 180px' }}>
+                        <div style={{ flex: '1 1 160px' }}>
                           <label className="label" style={{ fontSize: '0.85rem' }}>Supplier Price (INR)</label>
                           <input
                             type="number"
@@ -505,6 +512,26 @@ export default function SupplierPortalPage() {
                               }))
                             }
                           />
+                        </div>
+
+                        <div style={{ flex: '1 1 160px' }}>
+                          <label className="label" style={{ fontSize: '0.85rem' }}>Offer Expiry (G4)</label>
+                          <select
+                            className="input"
+                            value={form.expires_in_minutes !== undefined ? form.expires_in_minutes : '30'}
+                            onChange={(e) =>
+                              setAssignForm((prev) => ({
+                                ...prev,
+                                [req.request_id]: { ...form, expires_in_minutes: e.target.value },
+                              }))
+                            }
+                          >
+                            <option value="15">⏱️ 15 Minutes</option>
+                            <option value="30">⏱️ 30 Minutes</option>
+                            <option value="60">⏱️ 1 Hour</option>
+                            <option value="120">⏱️ 2 Hours</option>
+                            <option value="0">♾️ No Expiry</option>
+                          </select>
                         </div>
 
                         <button
@@ -560,6 +587,14 @@ export default function SupplierPortalPage() {
                       <span className="text-muted text-sm">Offered Price:</span>
                       <strong style={{ color: '#2563eb' }}>INR {Number(offer.price_inr).toLocaleString()}</strong>
                     </div>
+                    {offer.expires_at && (
+                      <div className="info-row" style={{ marginTop: '0.4rem' }}>
+                        <span className="text-muted text-sm">Expires:</span>
+                        <span style={{ fontSize: '0.85rem', color: '#dc2626', fontWeight: 600 }}>
+                          ⏱️ {new Date(offer.expires_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ({new Date(offer.expires_at).toLocaleDateString()})
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -589,49 +624,95 @@ export default function SupplierPortalPage() {
                 const isWaiting = chg.status === 'WAITING';
 
                 return (
-                  <div key={chg.change_id} className="card" style={{ marginBottom: '1.5rem', borderLeft: isWaiting ? '4px solid #f59e0b' : '4px solid #e2e8f0' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+                  <div key={chg.change_id} className="card" style={{ marginBottom: '1.5rem', borderLeft: isWaiting ? '4px solid #f59e0b' : chg.status === 'ACCEPTED' ? '4px solid #16a34a' : '4px solid #dc2626' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                       <div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span style={{ fontWeight: 800 }}>Change Request {chg.change_id}</span>
+                          <span style={{ fontWeight: 800, fontSize: '1.1rem' }}>Change Request {chg.change_id}</span>
                           <Badge status={chg.status} />
                         </div>
                         <div className="text-sm text-muted" style={{ marginTop: '0.2rem' }}>
-                          Booking Number: <strong>{chg.booking_number}</strong>
+                          Booking Number: <strong>{chg.booking_number}</strong> {chg.traveler_name && `· Passenger: ${chg.traveler_name}`}
+                        </div>
+                      </div>
+                      {chg.decided_at && (
+                        <div className="text-sm text-muted">
+                          Decided: {new Date(chg.decided_at).toLocaleString()}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Comparison Table */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem', background: '#f8fafc', padding: '1rem', borderRadius: '8px', marginBottom: '1rem' }}>
+                      <div style={{ borderRight: '1px solid #e2e8f0', paddingRight: '1rem' }}>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
+                          Current Confirmed Booking
+                        </div>
+                        <div className="info-row" style={{ marginBottom: '0.3rem' }}>
+                          <span className="text-muted text-sm">Flight:</span>
+                          <strong>{chg.original_flight_id || 'N/A'}</strong>
+                        </div>
+                        <div className="info-row">
+                          <span className="text-muted text-sm">Pickup Time:</span>
+                          <strong>{chg.original_pickup || 'N/A'}</strong>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#2563eb', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
+                          Proposed Modification (Traveler)
+                        </div>
+                        <div className="info-row" style={{ marginBottom: '0.3rem' }}>
+                          <span className="text-muted text-sm">Proposed Flight:</span>
+                          <strong style={{ color: chg.new_flight_id && chg.new_flight_id !== chg.original_flight_id ? '#2563eb' : '#1e293b' }}>
+                            {chg.new_flight_id || chg.original_flight_id}
+                          </strong>
+                        </div>
+                        <div className="info-row">
+                          <span className="text-muted text-sm">Proposed Pickup:</span>
+                          <strong style={{ color: '#2563eb' }}>{chg.new_pickup}</strong>
                         </div>
                       </div>
                     </div>
 
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', background: '#f8fafc', padding: '1rem', borderRadius: '8px', marginBottom: '1rem' }}>
-                      <div>
-                        <span className="text-muted text-sm">Proposed Flight:</span>
-                        <div><strong>{chg.new_flight_id || 'Same Flight'}</strong></div>
+                    {chg.remarks && (
+                      <div style={{ background: '#f1f5f9', padding: '0.5rem 0.75rem', borderRadius: '6px', fontSize: '0.85rem', marginBottom: '1rem' }}>
+                        <strong>Decision Remarks:</strong> {chg.remarks}
                       </div>
-                      <div>
-                        <span className="text-muted text-sm">Proposed Pickup Time:</span>
-                        <div><strong style={{ color: '#2563eb' }}>{chg.new_pickup || 'Same Time'}</strong></div>
-                      </div>
-                    </div>
+                    )}
 
                     {status.error && <div className="alert-error" style={{ marginBottom: '1rem' }}>⚠️ {status.error}</div>}
                     {status.success && <div className="alert-success" style={{ marginBottom: '1rem' }}>✅ {status.success}</div>}
 
                     {isWaiting && (
-                      <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', borderTop: '1px solid #e2e8f0', paddingTop: '1rem' }}>
-                        <button
-                          className="btn-danger btn-sm"
-                          onClick={() => handleDecision(chg.change_id, 'REJECTED')}
-                          disabled={status.loading}
-                        >
-                          ✕ Reject Change
-                        </button>
-                        <button
-                          className="btn-primary btn-sm"
-                          onClick={() => handleDecision(chg.change_id, 'ACCEPTED')}
-                          disabled={status.loading}
-                        >
-                          ✓ Accept Change
-                        </button>
+                      <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '1rem' }}>
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <label className="label" style={{ fontSize: '0.85rem' }}>Remarks (Optional for Accept / Reason for Rejection)</label>
+                          <input
+                            type="text"
+                            className="input"
+                            placeholder="e.g. Schedule approved OR Vehicle unavailable due to overlapping trip"
+                            value={remarksState[chg.change_id] || ''}
+                            onChange={(e) => setRemarksState(prev => ({ ...prev, [chg.change_id]: e.target.value }))}
+                            style={{ fontSize: '0.85rem' }}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+                          <button
+                            className="btn-danger btn-sm"
+                            onClick={() => handleDecision(chg.change_id, 'REJECTED')}
+                            disabled={status.loading}
+                          >
+                            ✕ Reject Change
+                          </button>
+                          <button
+                            className="btn-primary btn-sm"
+                            onClick={() => handleDecision(chg.change_id, 'ACCEPTED')}
+                            disabled={status.loading}
+                          >
+                            ✓ Accept Change
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>

@@ -144,25 +144,51 @@ def create_change(booking_number, new_flight_id=None, new_pickup=None):
 
     selected_flight_id = new_flight_id or booking["flight_id"]
 
+    flight = next(
+        (f for f in data_loader.get_flights() if f["flight_id"] == selected_flight_id),
+        None
+    )
+    if flight is None:
+        return False, "New flight not found"
+
     if new_pickup:
         selected_pickup = new_pickup
     else:
-        flight = next(
-            f for f in data_loader.get_flights()
-            if f["flight_id"] == selected_flight_id
-        )
         selected_pickup = (
             datetime.fromisoformat(flight["arrival_local"])
             + timedelta(minutes=60)
         ).isoformat(timespec="minutes")
+
+    # Date and time validation (strict past date check with airport timezone)
+    arrival_airport = flight["to"]
+    arrival_time = datetime.fromisoformat(flight["arrival_local"])
+    try:
+        from app.date_validation import validate_flight_and_pickup
+        pickup_dt = datetime.fromisoformat(selected_pickup)
+        is_valid, err_msg, resolved_pickup = validate_flight_and_pickup(
+            airport_code=arrival_airport,
+            landing_dt=arrival_time,
+            pickup_dt=pickup_dt
+        )
+        if not is_valid and "past" in err_msg.lower():
+            return False, err_msg
+        if resolved_pickup:
+            selected_pickup = resolved_pickup.replace(tzinfo=None).isoformat(timespec="minutes")
+    except Exception:
+        pass
 
     change = {
         "change_id": "CHG-" + uuid4().hex[:8].upper(),
         "booking_id": booking["booking_id"],
         "booking_number": booking_number,
         "company_id": booking["company_id"],
+        "traveler_name": booking.get("traveler_name"),
+        "original_flight_id": booking.get("flight_id"),
+        "original_pickup": booking.get("pickup"),
         "new_flight_id": selected_flight_id,
         "new_pickup": selected_pickup,
+        "remarks": None,
+        "decided_at": None,
         "status": "WAITING"
     }
 
@@ -170,7 +196,7 @@ def create_change(booking_number, new_flight_id=None, new_pickup=None):
     return True, change
 
 
-def decide_change(change_id, decision):
+def decide_change(change_id, decision, remarks=None):
     changes = workflow_store.get_change_requests()
 
     change = next(
@@ -187,10 +213,16 @@ def decide_change(change_id, decision):
     if decision not in ["ACCEPTED", "REJECTED"]:
         return False, "Decision must be ACCEPTED or REJECTED"
 
+    decided_at = datetime.utcnow().isoformat()
+
     if decision == "REJECTED":
         updated = workflow_store.update_change_request(
             change_id,
-            {"status": "REJECTED"}
+            {
+                "status": "REJECTED",
+                "remarks": remarks or "Change request rejected by supplier",
+                "decided_at": decided_at
+            }
         )
         return True, updated
 
@@ -226,7 +258,11 @@ def decide_change(change_id, decision):
 
     updated = workflow_store.update_change_request(
         change_id,
-        {"status": "ACCEPTED"}
+        {
+            "status": "ACCEPTED",
+            "remarks": remarks or "Change request approved by supplier",
+            "decided_at": decided_at
+        }
     )
 
     return True, updated

@@ -49,6 +49,21 @@ def _get_db_session():
 
 # ---- Offers ----------------------------------------------------------------
 
+def _to_dt(val):
+    if not val:
+        return None
+    from datetime import datetime
+    if isinstance(val, datetime):
+        return val
+    try:
+        clean = str(val).replace("Z", "").replace("T", " ")
+        if "." in clean:
+            clean = clean.split(".")[0]
+        return datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
 def _db_upsert_offer(offer: dict):
     db = _get_db_session()
     if db is None:
@@ -56,9 +71,12 @@ def _db_upsert_offer(offer: dict):
     try:
         from app.database import OfferDB
         exists = db.query(OfferDB).filter_by(offer_id=offer["offer_id"]).first()
+        dt_val = _to_dt(offer.get("expires_at"))
         if exists:
             exists.status = offer.get("status", exists.status)
             exists.price_inr = offer.get("price_inr", exists.price_inr)
+            if "expires_at" in offer:
+                exists.expires_at = dt_val
         else:
             db.add(OfferDB(
                 offer_id=offer["offer_id"],
@@ -67,6 +85,7 @@ def _db_upsert_offer(offer: dict):
                 vehicle_id=offer["vehicle_id"],
                 price_inr=offer["price_inr"],
                 status=offer.get("status", "OFFERED"),
+                expires_at=dt_val,
             ))
         db.commit()
     except Exception as exc:
@@ -91,6 +110,7 @@ def _db_get_offers():
                 "vehicle_id": r.vehicle_id,
                 "price_inr": float(r.price_inr),
                 "status": r.status,
+                "expires_at": (r.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(r.expires_at, "strftime") else str(r.expires_at) + "Z") if getattr(r, "expires_at", None) else None,
             }
             for r in rows
         ]
@@ -221,14 +241,23 @@ def _db_upsert_change(change: dict):
         ).first()
         if exists:
             exists.status = change.get("status", exists.status)
+            if "remarks" in change:
+                exists.remarks = change.get("remarks")
+            if "decided_at" in change:
+                exists.decided_at = change.get("decided_at")
         else:
             db.add(ChangeRequestDB(
                 change_id=change["change_id"],
                 booking_id=change["booking_id"],
                 booking_number=change["booking_number"],
                 company_id=change["company_id"],
+                traveler_name=change.get("traveler_name"),
+                original_flight_id=change.get("original_flight_id"),
+                original_pickup=change.get("original_pickup"),
                 new_flight_id=change.get("new_flight_id"),
                 new_pickup=change.get("new_pickup"),
+                remarks=change.get("remarks"),
+                decided_at=change.get("decided_at"),
                 status=change.get("status", "WAITING"),
             ))
         db.commit()
@@ -252,8 +281,13 @@ def _db_get_change_requests():
                 "booking_id": r.booking_id,
                 "booking_number": r.booking_number,
                 "company_id": r.company_id,
+                "traveler_name": r.traveler_name,
+                "original_flight_id": r.original_flight_id,
+                "original_pickup": r.original_pickup,
                 "new_flight_id": r.new_flight_id,
                 "new_pickup": r.new_pickup,
+                "remarks": r.remarks,
+                "decided_at": r.decided_at.isoformat() if getattr(r, "decided_at", None) else None,
                 "status": r.status,
             }
             for r in rows

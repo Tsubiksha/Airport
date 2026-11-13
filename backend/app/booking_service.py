@@ -1,4 +1,5 @@
 
+from datetime import datetime, timezone
 from uuid import uuid4
 import secrets
 
@@ -41,6 +42,21 @@ def book_offer(offer_id):
 
     if offer["status"] != "OFFERED":
         return False, "This offer is no longer available for booking"
+
+    # G4: Offer Expiry check
+    if offer.get("expires_at"):
+        try:
+            expires_at_dt = datetime.fromisoformat(str(offer["expires_at"]).replace("Z", "+00:00"))
+            now_dt = datetime.utcnow()
+            if expires_at_dt.tzinfo is not None:
+                from datetime import timezone
+                now_dt = datetime.now(timezone.utc)
+            if now_dt > expires_at_dt:
+                offer["status"] = "EXPIRED"
+                workflow_store.update_offer(offer["offer_id"], {"status": "EXPIRED"})
+                return False, "This offer has expired"
+        except Exception:
+            pass
 
     all_requests = (
         __import__("app.matching_service", fromlist=["get_all_requests"])
@@ -163,14 +179,32 @@ def get_booking_summary(booking_number):
         None
     )
 
+    # Fetch change requests for this booking
+    all_changes = workflow_store.get_change_requests()
+    booking_changes = [
+        c for c in all_changes
+        if c.get("booking_number") == booking_number or c.get("booking_id") == booking.get("booking_id")
+    ]
+    booking_changes.sort(key=lambda x: x.get("change_id", ""), reverse=True)
+    active_change = next((c for c in booking_changes if c.get("status") == "WAITING"), None)
+    latest_change = booking_changes[0] if booking_changes else None
+
     return {
+        "booking_id": booking["booking_id"],
         "booking_number": booking["booking_number"],
         "status": booking["status"],
         "traveler_name": booking["traveler_name"],
         "flight": flight,
+        "flight_id": booking["flight_id"],
         "hotel": hotel,
+        "hotel_id": booking["hotel_id"],
         "pickup": booking["pickup"],
-        "supplier": supplier["name"] if supplier else None,
+        "company_id": booking["company_id"],
+        "supplier": supplier["name"] if supplier else booking["company_id"],
         "vehicle_id": booking["vehicle_id"],
-        "price_inr": booking["price_inr"]
+        "price_inr": booking["price_inr"],
+        "drive_minutes": booking.get("drive_minutes"),
+        "change_requests": booking_changes,
+        "active_change": active_change,
+        "latest_change": latest_change,
     }

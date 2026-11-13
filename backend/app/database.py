@@ -84,6 +84,7 @@ class OfferDB(Base):
     vehicle_id = Column(String(50), nullable=False)
     price_inr = Column(Numeric(10, 2), nullable=False)
     status = Column(String(20), nullable=False, default="OFFERED")
+    expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(
         DateTime,
@@ -127,8 +128,13 @@ class ChangeRequestDB(Base):
     booking_id = Column(String(50), index=True, nullable=False)
     booking_number = Column(String(20), nullable=False)
     company_id = Column(String(50), nullable=False)
+    traveler_name = Column(String(255), nullable=True)
+    original_flight_id = Column(String(50), nullable=True)
+    original_pickup = Column(String(50), nullable=True)
     new_flight_id = Column(String(50), nullable=True)
     new_pickup = Column(String(50), nullable=True)
+    remarks = Column(Text, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
     status = Column(String(20), nullable=False, default="WAITING")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(

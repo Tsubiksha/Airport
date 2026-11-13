@@ -219,6 +219,37 @@ export default function BookingLookupPage() {
             </div>
           </div>
 
+          {/* Change Requests Section */}
+          {booking.change_requests && booking.change_requests.length > 0 && (
+            <div style={{ background: '#f8fafc', padding: '1.25rem', borderRadius: '8px', marginBottom: '2rem', border: '1px solid #e2e8f0' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#1e293b' }}>🔄 Flight &amp; Pickup Change Requests</div>
+                <span className="text-sm text-muted">Total: {booking.change_requests.length}</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                {booking.change_requests.map((chg) => (
+                  <div key={chg.change_id} style={{ background: 'white', padding: '0.75rem 1rem', borderRadius: '6px', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>{chg.change_id}</span>
+                        <Badge status={chg.status} />
+                      </div>
+                      <div className="text-sm text-muted" style={{ marginTop: '0.2rem' }}>
+                        Flight: <strong>{chg.new_flight_id || 'Same'}</strong> · Pickup: <strong>{chg.new_pickup}</strong>
+                        {chg.remarks && <span> · Remarks: <em>{chg.remarks}</em></span>}
+                      </div>
+                    </div>
+                    {chg.decided_at && (
+                      <span className="text-sm text-muted">
+                        {new Date(chg.decided_at).toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Actions */}
           <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', borderTop: '1px solid #e2e8f0', paddingTop: '1.5rem' }}>
             <Link href={`/change?number=${booking.booking_number}`} className="btn-secondary">

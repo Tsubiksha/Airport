@@ -68,6 +68,7 @@ function Badge({ status }) {
     NOT_CHOSEN: 'badge-not-chosen',
     WAITING: 'badge-waiting',
     OPEN: 'badge-open',
+    EXPIRED: 'badge-rejected',
   }[status] || 'badge-waiting';
   return <span className={`badge ${cls}`}>{status}</span>;
 }
@@ -1007,15 +1008,24 @@ export function OffersStep({ requestId, onBooked }) {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           {filtered.map(offer => {
-            const isOffered = offer.status === 'OFFERED';
+            const expireDate = offer.expires_at ? new Date(offer.expires_at.endsWith('Z') ? offer.expires_at : offer.expires_at + 'Z') : null;
+            const isExpired = offer.status === 'EXPIRED' || (expireDate && expireDate < new Date());
+            const displayStatus = isExpired && offer.status === 'OFFERED' ? 'EXPIRED' : offer.status;
+            const isOffered = offer.status === 'OFFERED' && !isExpired;
+
             return (
-              <div key={offer.offer_id} className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', borderLeft: isOffered ? '4px solid #2563eb' : '4px solid #cbd5e1' }}>
+              <div key={offer.offer_id} className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', borderLeft: isOffered ? '4px solid #2563eb' : isExpired ? '4px solid #dc2626' : '4px solid #cbd5e1' }}>
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 800, fontSize: '1.15rem' }}>
                       {offer.company_name || offer.company_id}
                     </span>
-                    <Badge status={offer.status} />
+                    <Badge status={displayStatus} />
+                    {expireDate && (
+                      <span style={{ fontSize: '0.8rem', color: isExpired ? '#dc2626' : '#b45309', background: isExpired ? '#fee2e2' : '#fef3c7', padding: '0.2rem 0.55rem', borderRadius: '4px', fontWeight: 600 }}>
+                        {isExpired ? '⚠️ Expired' : `⏱️ Expires: ${expireDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                      </span>
+                    )}
                   </div>
 
                   <div className="info-row" style={{ gap: '1.5rem', flexWrap: 'wrap' }}>

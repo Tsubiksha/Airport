@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from pydantic import BaseModel, Field
 
@@ -450,6 +450,7 @@ from pydantic import BaseModel, Field
 class AssignVehicleInput(BaseModel):
     vehicle_id: str
     price_inr: int = Field(gt=0)
+    expires_in_minutes: int | None = None
 
 
 @app.post("/api/requests/{request_id}/offers")
@@ -501,6 +502,35 @@ def create_supplier_offer(
     if not success:
         raise HTTPException(status_code=400, detail=result)
 
+    expires_at = None
+    if payload.expires_in_minutes and payload.expires_in_minutes > 0:
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=payload.expires_in_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # If this supplier already offered this exact vehicle for this request, update it
+    existing_offer = next(
+        (
+            o for o in workflow_store.get_offers()
+            if o.get("request_id") == request_id
+            and o.get("company_id") == company_id
+            and o.get("vehicle_id") == payload.vehicle_id
+            and o.get("status") in ["OFFERED", "EXPIRED"]
+        ),
+        None
+    )
+    if existing_offer:
+        updated = workflow_store.update_offer(
+            existing_offer["offer_id"],
+            {
+                "price_inr": payload.price_inr,
+                "expires_at": expires_at,
+                "status": "OFFERED",
+            }
+        )
+        return {
+            "message": "Offer updated successfully",
+            "offer": updated or existing_offer
+        }
+
     offer = {
         "offer_id": "OFF-" + uuid4().hex[:8].upper(),
         "request_id": request_id,
@@ -513,7 +543,8 @@ def create_supplier_offer(
         "small_bags": result["vehicle"]["small_bags"],
         "price_inr": payload.price_inr,
         "status": "OFFERED",
-        "created_at": datetime.utcnow().isoformat()
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     }
 
     workflow_store.add_offer(offer)
@@ -638,6 +669,18 @@ class ChangeRequestInput(BaseModel):
 
 class ChangeDecisionInput(BaseModel):
     decision: str
+    remarks: str | None = None
+
+
+@app.get("/api/bookings/{booking_number}/change-requests")
+def get_booking_change_requests(booking_number: str):
+    all_changes = workflow_store.get_change_requests()
+    changes = [c for c in all_changes if c.get("booking_number") == booking_number]
+    return {
+        "booking_number": booking_number,
+        "total": len(changes),
+        "change_requests": changes
+    }
 
 
 @app.post("/api/bookings/{booking_number}/change-requests")
@@ -688,7 +731,8 @@ def decide_booking_change(
 
     success, result = change_service.decide_change(
         change_id,
-        decision
+        decision,
+        remarks=payload.remarks
     )
 
     if not success:
@@ -722,3 +766,35 @@ def get_supplier_offers(company_id: str):
         "total_offers": len(offers),
         "offers": offers
     }
+
+
+# -------------------------------------------------------------
+# STRETCH FEATURE S1: SHARED RIDE EVALUATOR
+# -------------------------------------------------------------
+
+@app.get("/api/shared-rides/evaluate")
+def evaluate_shared_ride(request_id_1: str, request_id_2: str):
+    """
+    Stretch S1: Evaluate if two ride requests can share one vehicle.
+    Must share same flight, same destination area, and fit within vehicle capacity.
+    """
+    all_requests = matching_service.get_all_requests()
+    r1 = next((r for r in all_requests if r.get("request_id") == request_id_1), None)
+    r2 = next((r for r in all_requests if r.get("request_id") == request_id_2), None)
+
+    if not r1:
+        raise HTTPException(status_code=404, detail=f"Request {request_id_1} not found")
+    if not r2:
+        raise HTTPException(status_code=404, detail=f"Request {request_id_2} not found")
+
+    from app.shared_ride_service import evaluate_shared_ride_compatibility
+    is_compatible, reason, details = evaluate_shared_ride_compatibility(r1, r2)
+
+    return {
+        "compatible": is_compatible,
+        "reason": reason,
+        "request_1": r1,
+        "request_2": r2,
+        "evaluation": details
+    }
+

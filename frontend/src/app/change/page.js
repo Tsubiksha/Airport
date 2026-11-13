@@ -68,6 +68,11 @@ export default function ChangeRequestPage() {
         setNewFlightId(data.flight.flight_id);
       }
       setNewPickup(data.pickup || '');
+      if (data.active_change) {
+        setChangeResult(data.active_change);
+      } else if (data.latest_change) {
+        setChangeResult(data.latest_change);
+      }
     } catch (err) {
       setError(err.message || 'Booking not found');
     } finally {
@@ -107,26 +112,22 @@ export default function ChangeRequestPage() {
     }
   };
 
-  // Auto-sync change status every 3 seconds while WAITING
+  // Auto-sync change status every 3 seconds while booking is active
   useEffect(() => {
-    if (!booking?.booking_number || !changeResult || changeResult.status !== 'WAITING') return;
+    if (!booking?.booking_number) return;
 
     const interval = setInterval(async () => {
       try {
         const updatedBooking = await apiFetch(`/api/bookings/${booking.booking_number}`);
         setBooking(updatedBooking);
-        // If booking pickup or flight changed, mark change as accepted
-        if (
-          (changeResult.new_pickup && updatedBooking.pickup === changeResult.new_pickup) ||
-          (changeResult.new_flight_id && updatedBooking.flight?.flight_id === changeResult.new_flight_id)
-        ) {
-          setChangeResult(prev => prev ? { ...prev, status: 'ACCEPTED' } : null);
+        if (updatedBooking.latest_change) {
+          setChangeResult(updatedBooking.latest_change);
         }
       } catch {}
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [booking, changeResult]);
+  }, [booking?.booking_number]);
 
   return (
     <div className="page-container" style={{ maxWidth: '800px' }}>
@@ -196,43 +197,87 @@ export default function ChangeRequestPage() {
             </div>
           </div>
 
-          {/* If change already requested successfully */}
+          {/* If change already requested */}
           {changeResult ? (
-            <div className="card" style={{ background: '#f0fdf4', border: '1px solid #86efac' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
-                <span style={{ fontSize: '1.8rem' }}>✅</span>
-                <div>
-                  <h3 style={{ margin: 0, color: '#16a34a' }}>Change Request Submitted</h3>
-                  <p className="text-sm text-muted" style={{ margin: 0 }}>Request ID: <strong>{changeResult.change_id}</strong></p>
+            <div
+              className="card"
+              style={{
+                background: changeResult.status === 'ACCEPTED' ? '#f0fdf4' : changeResult.status === 'REJECTED' ? '#fef2f2' : '#fffbeb',
+                border: changeResult.status === 'ACCEPTED' ? '1px solid #86efac' : changeResult.status === 'REJECTED' ? '1px solid #fca5a5' : '1px solid #fcd34d',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span style={{ fontSize: '1.8rem' }}>
+                    {changeResult.status === 'ACCEPTED' ? '✅' : changeResult.status === 'REJECTED' ? '❌' : '⏳'}
+                  </span>
+                  <div>
+                    <h3 style={{ margin: 0, color: changeResult.status === 'ACCEPTED' ? '#16a34a' : changeResult.status === 'REJECTED' ? '#dc2626' : '#b45309' }}>
+                      {changeResult.status === 'ACCEPTED'
+                        ? 'Change Request Accepted'
+                        : changeResult.status === 'REJECTED'
+                        ? 'Change Request Rejected by Supplier'
+                        : 'Change Request Pending Approval'}
+                    </h3>
+                    <p className="text-sm text-muted" style={{ margin: 0 }}>
+                      Request ID: <strong>{changeResult.change_id}</strong>
+                    </p>
+                  </div>
                 </div>
+                {changeResult.status === 'WAITING' && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', color: '#b45309', background: '#fef3c7', padding: '0.2rem 0.6rem', borderRadius: '999px', fontWeight: 600 }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#b45309', display: 'inline-block' }} />
+                    Live Syncing (3s)
+                  </span>
+                )}
               </div>
 
-              <div style={{ background: 'white', padding: '1rem', borderRadius: '6px', marginBottom: '1.5rem' }}>
+              <div style={{ background: 'white', padding: '1rem', borderRadius: '6px', marginBottom: '1.25rem', border: '1px solid #e2e8f0' }}>
                 <div className="info-row" style={{ marginBottom: '0.5rem' }}>
-                  <span className="text-muted text-sm">Status:</span>
+                  <span className="text-muted text-sm">Decision Status:</span>
                   <Badge status={changeResult.status} />
                 </div>
                 <div className="info-row" style={{ marginBottom: '0.5rem' }}>
                   <span className="text-muted text-sm">Proposed Flight:</span>
-                  <strong>{changeResult.new_flight_id}</strong>
+                  <strong>{changeResult.new_flight_id || 'Same Flight'}</strong>
                 </div>
-                <div className="info-row">
+                <div className="info-row" style={{ marginBottom: '0.5rem' }}>
                   <span className="text-muted text-sm">Proposed Pickup:</span>
                   <strong style={{ color: '#2563eb' }}>{changeResult.new_pickup}</strong>
                 </div>
+                {changeResult.remarks && (
+                  <div className="info-row">
+                    <span className="text-muted text-sm">Supplier Remarks:</span>
+                    <strong style={{ color: changeResult.status === 'REJECTED' ? '#dc2626' : '#1e293b' }}>
+                      {changeResult.remarks}
+                    </strong>
+                  </div>
+                )}
+                {changeResult.decided_at && (
+                  <div className="info-row" style={{ marginTop: '0.4rem' }}>
+                    <span className="text-muted text-sm">Decided At:</span>
+                    <span className="text-sm">{new Date(changeResult.decided_at).toLocaleString()}</span>
+                  </div>
+                )}
               </div>
 
               <p className="text-sm text-muted" style={{ marginBottom: '1.5rem' }}>
-                The supplier has received your proposed change. Once accepted or rejected in the supplier portal, your booking will be automatically updated.
+                {changeResult.status === 'ACCEPTED'
+                  ? 'Your flight and pickup schedule have been updated in the database and confirmed with the supplier.'
+                  : changeResult.status === 'REJECTED'
+                  ? 'The supplier was unable to accommodate the proposed change. Your existing booking remains active and unchanged.'
+                  : 'Your request has been dispatched to the taxi supplier. As soon as the supplier reviews it, this page will update automatically.'}
               </p>
 
-              <div style={{ display: 'flex', gap: '1rem' }}>
+              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
                 <Link href={`/lookup?number=${booking.booking_number}`} className="btn-primary">
-                  View Booking Status
+                  View Booking Status →
                 </Link>
-                <button className="btn-secondary" onClick={() => setChangeResult(null)}>
-                  Submit Another Change
-                </button>
+                {changeResult.status !== 'WAITING' && (
+                  <button className="btn-secondary" onClick={() => setChangeResult(null)}>
+                    Propose Another Change
+                  </button>
+                )}
               </div>
             </div>
           ) : (
